@@ -249,15 +249,22 @@ function packageTask(platform: string, arch: string, sourceFolderName: string, d
 		const copilotRuntimePrebuilds = gulp.src(getCopilotRuntimePrebuildFiles(platform, arch), { base: '.', dot: true, allowEmpty: true });
 		ensureOSProxyResolverPlatformPackage(platform, arch);
 		const osProxyResolverPlatformPackage = gulp.src(getOSProxyResolverPlatformFiles(platform, arch), { base: '.', dot: true, allowEmpty: true });
-		const deps = es.merge(cleanedDeps, copilotRuntimePrebuilds, osProxyResolverPlatformPackage)
-			.pipe(filter(getCopilotExcludeFilter(platform, arch)))
-			.pipe(filter(getCopilotTgrepExcludeFilter(platform, arch)))
-			.pipe(filter(getRipgrepExcludeFilter(platform, arch)))
-			.pipe(filter(getFoundryLocalExcludeFilter()))
-			.pipe(filter(getOSProxyResolverExcludeFilter(platform, arch)))
-			.pipe(jsFilter)
-			.pipe(util.rewriteSourceMappingURL(sourceMappingURLBase))
-			.pipe(jsFilter.restore)
+		// The Pi SDK imports this manifest at runtime via a JSON import attribute.
+		// Dotfiles are intentionally invisible to the `**` filters below, so the
+		// file is injected into the archive stream directly.
+		const piAgentManifest = gulp.src('node_modules/@earendil-works/pi-ai/dist/providers/data/.manifest.json', { base: '.', dot: true, allowEmpty: true });
+		const deps = es.merge(
+			es.merge(cleanedDeps, copilotRuntimePrebuilds, osProxyResolverPlatformPackage)
+				.pipe(filter(getCopilotExcludeFilter(platform, arch)))
+				.pipe(filter(getCopilotTgrepExcludeFilter(platform, arch)))
+				.pipe(filter(getRipgrepExcludeFilter(platform, arch)))
+				.pipe(filter(getFoundryLocalExcludeFilter()))
+				.pipe(filter(getOSProxyResolverExcludeFilter(platform, arch)))
+				.pipe(jsFilter)
+				.pipe(util.rewriteSourceMappingURL(sourceMappingURLBase))
+				.pipe(jsFilter.restore),
+			piAgentManifest
+		)
 			.pipe(createAsar(path.join(process.cwd(), 'node_modules'), [
 				'**/*.node',
 				'**/@vscode/ripgrep-universal/bin/**',

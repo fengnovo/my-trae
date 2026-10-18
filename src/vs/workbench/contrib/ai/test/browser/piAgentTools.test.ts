@@ -8,11 +8,15 @@ import { DeferredPromise, timeout } from '../../../../../base/common/async.js';
 import { Emitter, Event } from '../../../../../base/common/event.js';
 import { VSBuffer } from '../../../../../base/common/buffer.js';
 import { URI } from '../../../../../base/common/uri.js';
+import { upcastPartial } from '../../../../../base/test/common/mock.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import { IBulkEditOptions, IBulkEditService, ResourceEdit, ResourceFileEdit, ResourceTextEdit } from '../../../../../editor/browser/services/bulkEditService.js';
 import { IModelService } from '../../../../../editor/common/services/model.js';
 import { ITextModelService } from '../../../../../editor/common/services/resolverService.js';
 import { WorkspaceEdit } from '../../../../../editor/common/languages.js';
+import { CodeIndexState, ICodeIndexService } from '../../../../../platform/ai/common/codeIndex.js';
+import { IConfigurationService } from '../../../../../platform/configuration/common/configuration.js';
+import { TestConfigurationService } from '../../../../../platform/configuration/test/common/testConfigurationService.js';
 import { IDialogService, IConfirmationResult } from '../../../../../platform/dialogs/common/dialogs.js';
 import { TestDialogService } from '../../../../../platform/dialogs/test/common/testDialogService.js';
 import { FileType } from '../../../../../platform/files/common/files.js';
@@ -36,6 +40,8 @@ suite('Pi IDE tools', () => {
 		const fileService = store.add(new FileService(new NullLogService()));
 		store.add(fileService.registerProvider('file', store.add(provider)));
 		const instantiation = workbenchInstantiationService({ fileService: () => fileService }, store);
+		const configuration = new TestConfigurationService();
+		instantiation.stub(IConfigurationService, configuration);
 		const root = instantiation.invokeFunction(accessor => accessor.get(IWorkspaceContextService).getWorkspace().folders[0].uri);
 		await fileService.createFolder(root);
 		const resource = URI.joinPath(root, 'test.ts');
@@ -67,9 +73,28 @@ suite('Pi IDE tools', () => {
 			override confirm(): Promise<IConfirmationResult> { return onConfirm ? onConfirm() : Promise.resolve({ confirmed: true }); }
 		});
 		instantiation.stub(ITerminalService, new class extends mock<ITerminalService>() { });
+		instantiation.stub(ICodeIndexService, upcastPartial<ICodeIndexService>({
+			status: async () => ({ state: CodeIndexState.Disabled, files: 0, chunks: 0 }),
+			search: async () => [],
+		}));
 		const tools = store.add(instantiation.createInstance(PiAgentTools, networkFetch));
-		return { tools, resource, networkFetch, fileService, modelService, fileModel, instantiation, applied: () => applied };
+		return { tools, resource, networkFetch, fileService, modelService, fileModel, instantiation, configuration, applied: () => applied };
 	}
+
+	test('requires review by default and skips modification dialogs only with explicit full access', async () => {
+		let confirmations = 0;
+		const fixture = await setupTools(async () => { confirmations++; return { confirmed: false }; });
+		const request = { id: 'write', name: 'write_file' as const, mode: 'build' as const, arguments: { path: 'new.ts', content: 'agent edit' } };
+		const reviewed = await fixture.tools.execute(request);
+		await fixture.configuration.setUserConfiguration('myTrae.agent.accessMode', 'fullAccess');
+		const allowed = await fixture.tools.execute(request);
+		const memory = await fixture.tools.execute({ id: 'memory', name: 'remember', mode: 'build', arguments: { content: 'Project guidance' } });
+		await fixture.configuration.setUserConfiguration('myTrae.agent.accessMode', 'review');
+		const reviewedAgain = await fixture.tools.execute({ ...request, arguments: { path: 'other.ts', content: 'reviewed' } });
+		assert.deepStrictEqual({ confirmations, declined: reviewed.isError, allowed: allowed.isError, memory: memory.isError, declinedAgain: reviewedAgain.isError, applied: fixture.applied() }, { confirmations: 2, declined: true, allowed: undefined, memory: undefined, declinedAgain: true, applied: 1 });
+		fixture.tools.dispose();
+		await timeout(0); // Allow the synthetic memory document reference to be released.
+	});
 
 	test('reads the unsaved editor rather than disk', async () => {
 		const fixture = await setupTools();
@@ -77,6 +102,13 @@ suite('Pi IDE tools', () => {
 		model.object.textEditorModel.setValue('unsaved editor text');
 		const result = await fixture.tools.execute({ id: 'read', name: 'read_file', mode: 'plan', arguments: { path: 'test.ts' } });
 		assert.deepStrictEqual(result, { text: '1: unsaved editor text' });
+	});
+
+	test('reports an empty directory explicitly so the model can continue after inspection', async () => {
+		const fixture = await setupTools();
+		await fixture.fileService.createFolder(URI.joinPath(fixture.resource, '..', 'empty'));
+		const result = await fixture.tools.execute({ id: 'list-empty', name: 'list_dir', mode: 'build', arguments: { path: 'empty' } });
+		assert.deepStrictEqual({ isError: !!result.isError, hasResult: result.text.trim().length > 0 }, { isError: false, hasResult: true });
 	});
 
 	test('rejects model changes while approval is open', async () => {
@@ -98,6 +130,7 @@ suite('Pi IDE tools', () => {
 
 	test('plan mode cannot create a file and missing search configuration is explicit', async () => {
 		const fixture = await setupTools();
+		await fixture.configuration.setUserConfiguration('myTrae.agent.accessMode', 'fullAccess');
 		const write = await fixture.tools.execute({ id: 'write', name: 'write_file', mode: 'plan', arguments: { path: 'new.ts', content: 'agent edit' } });
 		const search = await fixture.tools.execute({ id: 'search', name: 'web_search', mode: 'plan', arguments: { query: 'test' } });
 		assert.deepStrictEqual({ blocked: write.isError, applied: fixture.applied(), missingSearch: search.isError }, { blocked: true, applied: 0, missingSearch: true });
@@ -170,9 +203,11 @@ suite('Pi IDE tools', () => {
 		await timeout(0); // Synthetic document reference release completes asynchronously.
 	});
 
-	test('rich shell integration returns correlated output and exit status', async () => {
-		const fixture = await setupTools();
+	test('full access runs terminal commands without a dialog and returns correlated output and exit status', async () => {
+		const fixture = await setupTools(async () => assert.fail('Full access must not ask for approval'));
+		await fixture.configuration.setUserConfiguration('myTrae.agent.accessMode', 'fullAccess');
 		const finished = store.add(new Emitter<ITerminalCommand>());
+		let exitCode = 0;
 		const capabilities = store.add(new TerminalCapabilityStore());
 		capabilities.add(TerminalCapability.CommandDetection, new class extends mock<ICommandDetectionCapability>() {
 			override readonly onCommandFinished = finished.event;
@@ -184,7 +219,7 @@ suite('Pi IDE tools', () => {
 			override async runCommand(_command: string, _execute: boolean, commandId?: string) {
 				finished.fire(new class extends mock<ITerminalCommand>() {
 					override id = commandId;
-					override exitCode = 7;
+					override exitCode = exitCode;
 					override getOutput() { return 'actual command output'; }
 				});
 			}
@@ -194,8 +229,11 @@ suite('Pi IDE tools', () => {
 			override async revealTerminal() { }
 		});
 		const tools = store.add(fixture.instantiation.createInstance(PiAgentTools, fixture.networkFetch));
-		const result = await tools.execute({ id: 'command', name: 'run_terminal_command', mode: 'build', arguments: { command: 'echo hello' } });
-		assert.deepStrictEqual(result, { text: 'Exit code: 7\nactual command output' });
+		const results = [];
+		for (exitCode of [0, 7, 127]) {
+			results.push(await tools.execute({ id: 'command', name: 'run_terminal_command', mode: 'build', arguments: { command: 'echo hello' } }));
+		}
+		assert.deepStrictEqual(results, [{ text: 'Exit code: 0\nactual command output', exitCode: 0 }, { text: 'Exit code: 7\nactual command output', isError: true, exitCode: 7 }, { text: 'Exit code: 127\nactual command output', isError: true, exitCode: 127 }]);
 	});
 
 	test('late terminal approval after abort never creates or starts a terminal', async () => {

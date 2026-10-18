@@ -52,5 +52,7 @@ dist
 
 # Throwaway Code OSS dev profiles created by the launch skill
 .v[0-9]*/
+# Isolated CODEX_HOME for `npm run mytrae:dev`
+/.codex-dev/
 # Local agent validation evidence
 .agent-validation/

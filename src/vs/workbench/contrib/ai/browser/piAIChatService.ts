@@ -8,16 +8,18 @@ import { hash } from '../../../../base/common/hash.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { URI } from '../../../../base/common/uri.js';
 import { localize } from '../../../../nls.js';
+import { CancellationError, getErrorMessage } from '../../../../base/common/errors.js';
 import { IModelService } from '../../../../editor/common/services/model.js';
 import { AIRequestPurpose, ILLMService, LLMProviderKind } from '../../../../platform/ai/common/ai.js';
 import { AIConfig, readAIConfiguration } from '../../../../platform/ai/common/aiConfiguration.js';
+import { ICodeIndexService } from '../../../../platform/ai/common/codeIndex.js';
 import { IPiAgentService, IPiPlanStep, IPiSessionInfo, IPiSnapshot, PiAgentMode } from '../../../../platform/ai/common/piAgent.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IEnvironmentService } from '../../../../platform/environment/common/environment.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
-import { AIChatRole, IAIChatContextItem, IAIChatService, IAIChatSession } from '../common/aiChat.js';
+import { AIChatContextKind, AIChatRole, IAIChatContextItem, IAIChatService, IAIChatSession } from '../common/aiChat.js';
 import { buildContextBlock } from '../common/prompts.js';
 
 /** Projects Pi's persisted transcript without maintaining a second agent or history store. */
@@ -33,8 +35,9 @@ export class PiAIChatService extends Disposable implements IAIChatService {
 	private initialized = false;
 	private generation = 0;
 	private operation: AbortController | undefined;
+	private pendingMode: PiAgentMode | undefined;
 	private initialization: Promise<void>;
-	mode: PiAgentMode = 'chat';
+	mode: PiAgentMode = 'build';
 	plan: readonly IPiPlanStep[] = [];
 	initializationError: string | undefined;
 
@@ -46,6 +49,7 @@ export class PiAIChatService extends Disposable implements IAIChatService {
 		@IEnvironmentService private readonly environment: IEnvironmentService,
 		@IFileService private readonly files: IFileService,
 		@IModelService private readonly models: IModelService,
+		@ICodeIndexService private readonly index: ICodeIndexService,
 		@ILogService private readonly log: ILogService,
 	) {
 		super();
@@ -102,7 +106,7 @@ export class PiAIChatService extends Disposable implements IAIChatService {
 		this.sessionInfos = [snapshot.session, ...this.sessionInfos.filter(info => info.id !== snapshot.session.id)];
 		this.sessionsList = [this.active, ...this.sessionsList.filter(session => session.id !== this.active?.id)];
 		this.hostStreaming = snapshot.isStreaming;
-		this.mode = snapshot.mode;
+		this.mode = this.pendingMode ?? snapshot.mode;
 		this.plan = snapshot.plan;
 		this.notify();
 	}
@@ -112,7 +116,7 @@ export class PiAIChatService extends Disposable implements IAIChatService {
 	}
 
 	setMode(mode: PiAgentMode): void {
-		if (!this.isStreaming) { this.mode = mode; this.notify(); }
+		if (!this.isStreaming) { this.mode = mode; this.pendingMode = mode; this.notify(); }
 	}
 
 	private async ensureReady(): Promise<void> {
@@ -131,6 +135,7 @@ export class PiAIChatService extends Disposable implements IAIChatService {
 		this.notify();
 		try {
 			await this.ensureReady();
+			this.pendingMode = undefined;
 			return await action();
 		} finally {
 			this.busy = false;
@@ -163,6 +168,7 @@ export class PiAIChatService extends Disposable implements IAIChatService {
 
 	async send(text: string, context: readonly IAIChatContextItem[]): Promise<void> {
 		if (!text.trim() || this.isStreaming) { return; }
+		const mode = this.mode;
 		const operation = new AbortController();
 		this.operation = operation;
 		this.busy = true;
@@ -170,24 +176,53 @@ export class PiAIChatService extends Disposable implements IAIChatService {
 		try {
 			await this.ensureReady();
 			const resolved: IAIChatContextItem[] = [];
+			const question = text.trim();
 			for (const item of context) {
+				if (item.kind === AIChatContextKind.Codebase) {
+					resolved.push(await this.resolveCodebase(item, question, operation.signal));
+					continue;
+				}
 				if (item.text !== undefined || !item.uri) { resolved.push(item); continue; }
 				const model = this.models.getModel(item.uri);
-				const text = model ? (item.range ? model.getValueInRange(item.range) : model.getValue()) : (await this.files.readFile(item.uri)).value.toString();
+				const fileText = model ? (item.range ? model.getValueInRange(item.range) : model.getValue()) : (await this.files.readFile(item.uri)).value.toString();
 				if (!model && item.range) {
-					const lines = text.split(/\r?\n/).slice(item.range.startLineNumber - 1, item.range.endLineNumber);
+					const lines = fileText.split(/\r?\n/).slice(item.range.startLineNumber - 1, item.range.endLineNumber);
 					if (lines.length) {
 						lines[lines.length - 1] = lines[lines.length - 1].slice(0, item.range.endColumn - 1);
 						lines[0] = lines[0].slice(item.range.startColumn - 1);
 					}
 					resolved.push({ ...item, text: lines.join('\n') });
-				} else { resolved.push({ ...item, text }); }
+				} else { resolved.push({ ...item, text: fileText }); }
 			}
-			if (!operation.signal.aborted) { await this.host.prompt({ text: text.trim(), context: buildContextBlock(resolved), mode: this.mode }); }
+			if (!operation.signal.aborted) {
+				this.pendingMode = undefined;
+				await this.host.prompt({ text: question, context: buildContextBlock(resolved), mode });
+			}
 		} finally {
 			this.busy = false;
 			this.operation = undefined;
 			this.notify();
+		}
+	}
+
+	/** Retrieval over the workspace index for `@codebase`; failures degrade to a note. */
+	private async resolveCodebase(item: IAIChatContextItem, query: string, signal: AbortSignal): Promise<IAIChatContextItem> {
+		if (!query) {
+			return { ...item, text: '' };
+		}
+		try {
+			const hits = await this.index.search({ text: query, maxResults: 8 });
+			if (hits.length === 0) {
+				return { ...item, text: localize('pi.indexNoHits', "The workspace index returned no matches for this question.") };
+			}
+			const body = hits.map(hit => `<retrieved path="${hit.path}" lines="${hit.startLine}-${hit.endLine}">\n${hit.text.slice(0, 2400)}\n</retrieved>`).join('\n');
+			return { ...item, text: `${localize('pi.indexHeader', "Semantic matches from the workspace index (verify against the files before relying on them):")}\n${body}` };
+		} catch (error) {
+			if (signal.aborted) {
+				throw new CancellationError();
+			}
+			this.log.warn('[pi] codebase retrieval failed', error);
+			return { ...item, text: localize('pi.indexUnavailable', "Codebase index unavailable: {0}", getErrorMessage(error)) };
 		}
 	}
 

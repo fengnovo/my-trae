@@ -20,30 +20,27 @@
 
 .mytrae-chat-toolbar {
 	display: flex;
-	flex-wrap: wrap;
-	align-items: center;
-	gap: var(--vscode-spacing-size40);
-	padding: var(--vscode-spacing-size80) var(--vscode-spacing-size120);
-}
-
-.mytrae-chat-toolbar select {
-	min-width: 0;
-	padding: var(--vscode-spacing-size40);
-	border: 1px solid var(--vscode-dropdown-border, transparent);
-	border-radius: var(--vscode-cornerRadius-small);
-	background: var(--vscode-dropdown-background);
-	color: var(--vscode-dropdown-foreground);
-	font: inherit;
-}
-
-.mytrae-chat-toolbar .mytrae-chat-session {
-	flex: 1 1 18ch;
-	min-width: min(100%, 14ch);
-	text-overflow: ellipsis;
-}
-
-.mytrae-chat-toolbar .mytrae-chat-action {
 	flex: 0 0 auto;
+	align-items: center;
+	min-width: 0;
+	gap: var(--vscode-spacing-size80, 8px);
+	padding: var(--vscode-spacing-size80, 8px) var(--vscode-spacing-size120, 12px);
+}
+
+.mytrae-chat-session-title {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-size: var(--vscode-fontSize-label1, 12px);
+	color: var(--vscode-descriptionForeground);
+}
+
+.mytrae-chat-toolbar-actions {
+	display: flex;
+	flex-shrink: 0;
+	gap: var(--vscode-spacing-size20, 2px);
 }
 
 .mytrae-chat-root button:focus-visible,
@@ -108,7 +105,7 @@
 	display: flex;
 	flex-wrap: wrap;
 	gap: 4px;
-	padding: 6px 12px 0;
+	padding: var(--vscode-spacing-size80, 8px) var(--vscode-spacing-size80, 8px) 0;
 }
 
 .mytrae-chat-chip {
@@ -160,16 +157,36 @@
 }
 
 .mytrae-chat-turn {
-	margin-bottom: var(--vscode-spacing-size160);
+	display: flow-root;
+	margin-bottom: var(--vscode-spacing-size80, 8px);
 }
 
-.mytrae-chat-role {
-	margin-bottom: var(--vscode-spacing-size40);
+.mytrae-chat-turn.user {
+	width: fit-content;
+	max-width: 80%;
+	margin-left: auto;
+}
+
+.mytrae-chat-turn-body {
+	-webkit-user-select: text;
+	user-select: text;
+}
+
+.mytrae-chat-turn-header {
+	float: right;
+	display: flex;
+	align-items: center;
+	gap: var(--vscode-spacing-size40, 4px);
+	margin-left: var(--vscode-spacing-size40, 4px);
+}
+
+.mytrae-chat-copy-status {
 	font-size: var(--vscode-fontSize-label2);
-	font-weight: var(--vscode-fontWeight-semiBold);
-	text-transform: uppercase;
-	letter-spacing: 0.04em;
 	color: var(--vscode-descriptionForeground);
+}
+
+.mytrae-chat-copy {
+	flex-shrink: 0;
 }
 
 .mytrae-chat-turn.user .mytrae-chat-turn-body {
@@ -183,6 +200,21 @@
 .mytrae-chat-turn.assistant .mytrae-chat-turn-body {
 	white-space: normal;
 	word-break: break-word;
+	line-height: 1.5;
+}
+
+.mytrae-chat-turn-body .rendered-markdown p {
+	margin: 0;
+}
+
+.mytrae-chat-turn-body .rendered-markdown p + p {
+	margin-top: var(--vscode-spacing-size60, 6px);
+}
+
+.mytrae-chat-turn-body .rendered-markdown ul,
+.mytrae-chat-turn-body .rendered-markdown ol {
+	margin-top: var(--vscode-spacing-size40, 4px);
+	margin-bottom: var(--vscode-spacing-size40, 4px);
 }
 
 .mytrae-chat-turn.error .mytrae-chat-turn-body {
@@ -196,7 +228,7 @@
 }
 
 .mytrae-chat-tool {
-	margin-bottom: var(--vscode-spacing-size80);
+	margin-bottom: var(--vscode-spacing-size60, 6px);
 	color: var(--vscode-descriptionForeground);
 }
 
@@ -248,7 +280,9 @@
 }
 
 .mytrae-chat-pending {
-	display: inline-block;
+	display: inline-flex;
+	align-items: center;
+	gap: var(--vscode-spacing-size40, 4px);
 	color: var(--vscode-descriptionForeground);
 }
 
@@ -284,75 +318,150 @@
 
 .mytrae-chat-input-row {
 	display: flex;
-	align-items: flex-end;
-	gap: 6px;
-	padding: 8px 12px;
-	border-top: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+	flex: 0 0 auto;
+	flex-direction: column;
+	min-width: 0;
+	margin: var(--vscode-spacing-size80, 8px) var(--vscode-spacing-size120, 12px);
+	border: 1px solid var(--vscode-input-border, var(--vscode-widget-border, var(--vscode-panel-border, transparent)));
+	border-radius: var(--vscode-cornerRadius-large, 8px);
+	background-color: var(--vscode-input-background);
+}
+
+.mytrae-chat-composer:focus-within {
+	border-color: var(--vscode-focusBorder);
 }
 
 .mytrae-chat-input {
-	flex: 1;
-	min-height: 48px;
-	max-height: 160px;
-	padding: var(--vscode-spacing-size60) var(--vscode-spacing-size80);
-	border: 1px solid var(--vscode-input-border, transparent);
-	border-radius: var(--vscode-cornerRadius-small);
-	background-color: var(--vscode-input-background);
+	box-sizing: border-box;
+	width: 100%;
+	min-height: 100px;
+	max-height: 200px;
+	padding: var(--vscode-spacing-size120, 12px);
+	border: none;
+	border-radius: inherit;
+	background: transparent;
 	color: var(--vscode-input-foreground);
-	font-family: inherit;
+	font: inherit;
+	line-height: 1.5;
 	font-size: inherit;
 	resize: vertical;
 }
 
-.mytrae-chat-input:focus {
-	outline: 1px solid var(--vscode-focusBorder);
-	outline-offset: -1px;
+.mytrae-chat-composer .mytrae-chat-input:focus {
+	outline: none;
+}
+
+.mytrae-chat-input::placeholder {
+	color: var(--vscode-input-placeholderForeground);
 }
 
 .mytrae-chat-actions {
 	display: flex;
+	flex-wrap: wrap;
 	align-items: center;
-	gap: 4px;
+	gap: var(--vscode-spacing-size40, 4px);
+	padding: var(--vscode-spacing-size60, 6px);
+}
+
+.mytrae-chat-model-actions {
+	display: flex;
+	align-items: center;
+	gap: var(--vscode-spacing-size60, 6px);
+	margin-left: auto;
+	min-width: 0;
 }
 
 .mytrae-chat-action {
 	display: inline-flex;
+	flex: 0 0 auto;
 	align-items: center;
-	padding: var(--vscode-spacing-size40);
+	justify-content: center;
+	box-sizing: border-box;
+	min-width: 28px;
+	min-height: 28px;
+	padding: var(--vscode-spacing-size40, 4px);
 	border: none;
-	border-radius: var(--vscode-cornerRadius-small);
+	border-radius: var(--vscode-cornerRadius-medium, 6px);
 	background: transparent;
 	color: var(--vscode-icon-foreground);
+	font: inherit;
 	cursor: pointer;
 }
 
-.mytrae-chat-action:hover {
+.mytrae-chat-action:hover:not(:disabled) {
 	background-color: var(--vscode-toolbar-hoverBackground);
 }
 
-.mytrae-chat-send {
-	padding: var(--vscode-spacing-size60) var(--vscode-spacing-size120);
+.mytrae-chat-root .mytrae-chat-action > .codicon {
+	color: inherit;
+}
+
+.mytrae-chat-control {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--vscode-spacing-size40, 4px);
+	min-width: 0;
+	padding: var(--vscode-spacing-size40, 4px) var(--vscode-spacing-size60, 6px);
+	border: 1px solid var(--vscode-dropdown-border, var(--vscode-panel-border, transparent));
+	border-radius: var(--vscode-cornerRadius-medium, 6px);
+	background: var(--vscode-dropdown-background);
+	color: var(--vscode-dropdown-foreground);
+	font-size: var(--vscode-fontSize-label1, 12px);
+}
+
+.mytrae-chat-control-label {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.mytrae-chat-control > .codicon {
+	flex-shrink: 0;
+}
+
+.mytrae-chat-mode-control {
+	position: relative;
+	padding: 0 var(--vscode-spacing-size60, 6px);
+}
+
+.mytrae-chat-mode-control > .codicon {
+	pointer-events: none;
+}
+
+.mytrae-chat-mode-control .mytrae-chat-mode {
+	appearance: none;
+	min-height: 26px;
+	padding: var(--vscode-spacing-size40, 4px) 20px var(--vscode-spacing-size40, 4px) 0;
+	margin-right: -20px;
 	border: none;
-	border-radius: var(--vscode-cornerRadius-small);
-	background-color: var(--vscode-button-background);
-	color: var(--vscode-button-foreground);
+	background: transparent;
+	color: inherit;
+	font: inherit;
 	cursor: pointer;
 }
 
-.mytrae-chat-send:hover {
+.mytrae-chat-mode option {
+	background: var(--vscode-dropdown-background);
+	color: var(--vscode-dropdown-foreground);
+}
+
+.mytrae-chat-model {
+	max-width: 160px;
+}
+
+.mytrae-chat-send {
+	min-width: 30px;
+	min-height: 30px;
+	background-color: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+}
+
+.mytrae-chat-send:hover:not(:disabled) {
 	background-color: var(--vscode-button-hoverBackground);
 }
 
 .mytrae-chat-send.stop {
 	background-color: var(--vscode-button-secondaryBackground);
 	color: var(--vscode-button-secondaryForeground);
-}
-
-.mytrae-chat-status {
-	padding: 2px var(--vscode-spacing-size120) var(--vscode-spacing-size60);
-	font-size: var(--vscode-fontSize-label2);
-	color: var(--vscode-descriptionForeground);
-	white-space: nowrap;
-	overflow: hidden;
-	text-overflow: ellipsis;
 }

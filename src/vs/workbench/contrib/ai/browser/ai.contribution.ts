@@ -7,7 +7,6 @@ import { Codicon } from '../../../../base/common/codicons.js';
 import { localize, localize2 } from '../../../../nls.js';
 import {
 	Action2,
-	MenuId,
 	registerAction2,
 } from '../../../../platform/actions/common/actions.js';
 import {
@@ -21,7 +20,6 @@ import {
 	DEFAULT_EMBEDDING_MODELS,
 	DEFAULT_PROVIDER_ID,
 } from '../../../../platform/ai/common/modelCatalog.js';
-import { ContextKeyExpr } from '../../../../platform/contextkey/common/contextkey.js';
 import {
 	Extensions as ConfigurationExtensions,
 	IConfigurationRegistry,
@@ -47,11 +45,14 @@ import {
 import { IViewsService } from '../../../services/views/common/viewsService.js';
 import { IAIChatService } from '../common/aiChat.js';
 import { AIChatViewPane } from './aiChatView.js';
+import { MYTRAE_VIEW_CONTAINER_ID } from './aiChatLayout.js';
 // Importing these modules registers their singletons (chat and credentials services).
 import './aiChatService.js';
 import './aiCredentialsService.js';
+// Registers the inline completion provider contribution.
+import './aiInlineCompletionProvider.js';
 
-const VIEW_CONTAINER_ID = 'workbench.view.myTrae';
+const VIEW_CONTAINER_ID = MYTRAE_VIEW_CONTAINER_ID;
 const FOCUS_CHAT_COMMAND_ID = 'myTrae.ai.focus';
 const NEW_SESSION_COMMAND_ID = 'myTrae.ai.newSession';
 const SET_API_KEY_COMMAND_ID = 'myTrae.ai.setApiKey';
@@ -79,7 +80,8 @@ const viewContainer = Registry.as<IViewContainersRegistry>(
 		hideIfEmpty: false,
 		order: 5,
 	},
-	ViewContainerLocation.Sidebar,
+	ViewContainerLocation.AuxiliaryBar,
+	{ isDefault: true },
 );
 
 const viewDescriptor: IViewDescriptor = {
@@ -109,14 +111,6 @@ class NewAIChatSessionAction extends Action2 {
 			icon: Codicon.add,
 			f1: true,
 			category: localize2('myTrae.category', "MyTrae AI"),
-			menu: [
-				{
-					id: MenuId.ViewTitle,
-					when: ContextKeyExpr.equals('view', AIChatViewPane.ID),
-					group: 'navigation',
-					order: 1,
-				},
-			],
 		});
 	}
 
@@ -350,12 +344,19 @@ Registry.as<IConfigurationRegistry>(
 				"Maximum number of lines before the cursor sent as completion context.",
 			),
 		},
+		[AIConfig.AgentAccessMode]: {
+			type: 'string',
+			enum: ['review', 'fullAccess'],
+			default: 'review',
+			scope: ConfigurationScope.APPLICATION,
+			description: localize('myTrae.agentAccessMode', "Choose whether agent file edits, commands and memory changes require human review or run with full access."),
+		},
 		[AIConfig.AgentAutoApproveReads]: {
 			type: 'boolean',
 			default: true,
 			description: localize(
 				'myTrae.agentAutoApproveReads',
-				"Let the agent read files and search the workspace without asking. Writes and terminal commands always require confirmation.",
+				"Let the agent read files and search the workspace without asking. Writes and terminal commands follow the agent access mode.",
 			),
 		},
 		[AIConfig.AgentSearchUrl]: {

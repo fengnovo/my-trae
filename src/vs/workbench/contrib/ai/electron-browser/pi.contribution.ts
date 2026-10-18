@@ -3,11 +3,14 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { ICodeIndexService } from '../../../../platform/ai/common/codeIndex.js';
 import { IPiAgentService } from '../../../../platform/ai/common/piAgent.js';
 import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
 import { IAIChatService } from '../common/aiChat.js';
+import { WorkspaceCodeIndexService } from './codeIndexService.js';
 import { PiAgentService } from './piAgentService.js';
 import { PiAIChatService } from '../browser/piAIChatService.js';
 
 registerSingleton(IPiAgentService, PiAgentService, InstantiationType.Delayed);
+registerSingleton(ICodeIndexService, WorkspaceCodeIndexService, InstantiationType.Eager);
 registerSingleton(IAIChatService, PiAIChatService, InstantiationType.Delayed);

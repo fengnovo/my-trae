@@ -31,6 +31,7 @@ export const enum AIConfig {
 	CompletionEnabled = 'myTrae.completion.enabled',
 	CompletionDebounceMs = 'myTrae.completion.debounceMs',
 	CompletionMaxPrefixLines = 'myTrae.completion.maxPrefixLines',
+	AgentAccessMode = 'myTrae.agent.accessMode',
 	AgentAutoApproveReads = 'myTrae.agent.autoApproveReads',
 	AgentMaxSteps = 'myTrae.agent.maxSteps',
 	AgentSearchUrl = 'myTrae.agent.searchUrl',

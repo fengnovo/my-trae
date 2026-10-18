@@ -47,7 +47,7 @@ const chatViewContainer: ViewContainer = Registry.as<IViewContainersRegistry>(Vi
 	storageId: ChatViewContainerId,
 	hideIfEmpty: true,
 	order: 1,
-}, ViewContainerLocation.AuxiliaryBar, { isDefault: true, doNotRegisterOpenCommand: true });
+}, ViewContainerLocation.AuxiliaryBar, { doNotRegisterOpenCommand: true });
 
 const chatViewDescriptor: IViewDescriptor = {
 	id: ChatViewId,

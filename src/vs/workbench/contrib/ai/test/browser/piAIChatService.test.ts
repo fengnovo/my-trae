@@ -11,7 +11,8 @@ import { upcastPartial } from '../../../../../base/test/common/mock.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import { IModelService } from '../../../../../editor/common/services/model.js';
 import { ILLMService, LLMProviderKind } from '../../../../../platform/ai/common/ai.js';
-import { IPiAgentService, IPiHostConfiguration, IPiSnapshot } from '../../../../../platform/ai/common/piAgent.js';
+import { CodeIndexState, ICodeIndexService } from '../../../../../platform/ai/common/codeIndex.js';
+import { IPiAgentService, IPiHostConfiguration, IPiSnapshot, PiAgentMode } from '../../../../../platform/ai/common/piAgent.js';
 import { TestConfigurationService } from '../../../../../platform/configuration/test/common/testConfigurationService.js';
 import { IFileService } from '../../../../../platform/files/common/files.js';
 import { NullLogService } from '../../../../../platform/log/common/log.js';
@@ -24,11 +25,11 @@ suite('Pi AI chat projection', () => {
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
 	const snapshot: IPiSnapshot = { session: { id: 'session-1', path: '/sessions/session-1.jsonl', title: 'Restored', updatedAt: 1 }, turns: [{ id: 'turn-1', role: 'assistant', content: 'Previous answer' }], isStreaming: false, mode: 'chat', plan: [] };
 
-	function setup(endpointReady?: Promise<void>) {
+	function setup(endpointReady?: Promise<void>, index?: Partial<ICodeIndexService>) {
 		const changes = store.add(new Emitter<IPiSnapshot>());
 		const requests = store.add(new Emitter<never>());
 		const configurations: IPiHostConfiguration[] = [];
-		const prompts: { text: string; context?: string }[] = [];
+		const prompts: { text: string; context?: string; mode: PiAgentMode }[] = [];
 		const host = upcastPartial<IPiAgentService>({
 			onDidChange: changes.event,
 			onDidRequestTool: requests.event,
@@ -44,7 +45,12 @@ suite('Pi AI chat projection', () => {
 		});
 		const configuration = new TestConfigurationService({ myTrae: { provider: 'ollama' } });
 		store.add(configuration.onDidChangeConfigurationEmitter);
-		const service = store.add(new PiAIChatService(host, llm, configuration, new TestContextService(), TestEnvironmentService, upcastPartial<IFileService>({}), upcastPartial<IModelService>({ getModel: () => null }), new NullLogService()));
+		const indexService = upcastPartial<ICodeIndexService>({
+			status: async () => ({ state: CodeIndexState.Ready, files: 1, chunks: 1 }),
+			search: async () => [],
+			...index,
+		});
+		const service = store.add(new PiAIChatService(host, llm, configuration, new TestContextService(), TestEnvironmentService, upcastPartial<IFileService>({}), upcastPartial<IModelService>({ getModel: () => null }), indexService, new NullLogService()));
 		return { service, changes, configurations, prompts, host };
 	}
 
@@ -58,6 +64,19 @@ suite('Pi AI chat projection', () => {
 		const { service, prompts } = setup();
 		await service.send('Explain the selected code', [{ kind: AIChatContextKind.Selection, label: 'sample.ts:1', uri: URI.file('/sample.ts'), text: 'const secretMarker = 42;' }]);
 		assert.deepStrictEqual({ text: prompts[0].text, hasContext: prompts[0].context?.includes('const secretMarker = 42;'), streaming: service.isStreaming }, { text: 'Explain the selected code', hasContext: true, streaming: false });
+	});
+
+	test('resolves @codebase through the workspace index and reports failures', async () => {
+		const { service, prompts } = setup(undefined, {
+			search: async () => [{ path: 'src/util.ts', startLine: 3, endLine: 9, text: 'export function slugify(value: string) {', score: 0.5 }],
+		});
+		await service.send('Where is slugify defined?', [{ kind: AIChatContextKind.Codebase, label: 'codebase' }]);
+		const context = prompts[0].context ?? '';
+		assert.deepStrictEqual({ text: prompts[0].text, hasHit: context.includes('<retrieved path="src/util.ts" lines="3-9">'), hasCode: context.includes('slugify') }, { text: 'Where is slugify defined?', hasHit: true, hasCode: true });
+
+		const failing = setup(undefined, { search: async () => { throw new Error('indexer offline'); } });
+		await failing.service.send('again', [{ kind: AIChatContextKind.Codebase, label: 'codebase' }]);
+		assert(failing.prompts[0].context?.includes('indexer offline'));
 	});
 
 	test('projects tool results and plan state from authoritative snapshots', async () => {
@@ -74,6 +93,18 @@ suite('Pi AI chat projection', () => {
 		await gate.complete();
 		await first;
 		assert.deepStrictEqual(prompts.map(prompt => prompt.text), ['first']);
+	});
+
+	test('keeps the selected Build mode when initialization restores an older Chat snapshot', async () => {
+		const gate = new DeferredPromise<void>();
+		const { service, changes, prompts } = setup(gate.p);
+		service.setMode('build');
+		changes.fire(snapshot);
+		const visibleMode = service.mode;
+		const sending = service.send('Create a blog home page', []);
+		await gate.complete();
+		await sending;
+		assert.deepStrictEqual({ visibleMode, requestMode: prompts[0].mode }, { visibleMode: 'build', requestMode: 'build' });
 	});
 
 	test('cancel before initialization completes never starts a model request', async () => {

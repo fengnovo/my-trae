@@ -8,9 +8,9 @@
 
 共享契约：`src/vs/platform/ai/common/piAgent.ts`。`IPiAgentHost` 提供 initialize/prompt/abort/session 管理，广播 `IPiSnapshot`，通过 `IPiToolRequest` 与 `completeTool` 反向调用 IDE。`IPiAgentService` 是桌面 IPC 代理。
 
-- [ ] Task 1：`platform/ai/node/piAgentService.ts`、`piAgentMain.ts` 与 Node 测试：使用真实 Pi SDK、内存凭据、会话恢复、流式快照、取消、工具模式与步数限制。验证通过本地模拟 HTTP 模型的 Pi 工具循环，禁止 mock 另写 agent loop。
-- [ ] Task 2：`workbench/contrib/ai/browser/piAgentTools.ts` 与浏览器测试：实现工作区读取/搜索/诊断、经确认的修改与命令、修改 checkpoint 与安全回滚、项目记忆、可配置搜索与网页读取。工具边界独立于模型。
-- [ ] Task 3：桌面 IPC proxy、Chat 投影、Plan/Build 切换、工具步骤、计划、会话列表、Markdown 与配置入口；加入构建 entry point。验证错误反馈、取消及切换会话不会混流。
-- [ ] Task 4：真实 Ollama 端到端验证、目标测试、类型与 lint、打包 smoke；更新原方案 M2/M4/M5 与构建手册，清理独立测试实例。
+- [x] Task 1：`platform/ai/node/piAgentService.ts`、`piAgentMain.ts` 与 Node 测试：使用真实 Pi SDK、内存凭据、会话恢复、流式快照、取消、工具模式与步数限制。验证通过本地模拟 HTTP 模型的 Pi 工具循环，禁止 mock 另写 agent loop。
+- [x] Task 2：`workbench/contrib/ai/browser/piAgentTools.ts` 与浏览器测试：实现工作区读取/搜索/诊断、经确认的修改与命令、修改 checkpoint 与安全回滚、项目记忆、可配置搜索与网页读取。工具边界独立于模型。
+- [x] Task 3：桌面 IPC proxy、Chat 投影、Plan/Build 切换、工具步骤、计划、会话列表、Markdown 与配置入口；加入构建 entry point。验证错误反馈、取消及切换会话不会混流。
+- [x] Task 4：真实 Ollama 端到端验证、目标测试、类型与 lint、打包 smoke；更新原方案 M2/M4/M5 与构建手册，清理独立测试实例。
 
-验收资料放入 `.agent-validation/pi/`。联网搜索使用可配置 JSON 搜索服务，未配置时明确报错；不假装提供搜索结果。M5 的大型代码库向量索引仍单独验收，本次记忆首先采用可编辑持久化文本。
+验收资料放入 `.agent-validation/pi/`。联网搜索使用可配置 JSON 搜索服务，未配置时明确报错；不假装提供搜索结果。M5 的大型代码库向量索引已于 2026-10-17 单独验收完成（`node:sqlite` 向量库 + RRF 混合检索，证据见 `.agent-validation/index/`，`search_code` 已切换到向量索引服务），详见原方案 §9 里程碑状态段。

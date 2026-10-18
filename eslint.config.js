@@ -1663,6 +1663,7 @@ export default defineConfig(
 						'inspector',
 						'minimist',
 						'node:module',
+						'node:sqlite', // builtin sqlite used by the MyTrae code index store
 						'node:url',
 						'node:v8',
 						'native-keymap',

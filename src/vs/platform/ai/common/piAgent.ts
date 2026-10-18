@@ -41,6 +41,7 @@ export interface IPiToolRequest {
 export interface IPiToolResult {
 	readonly text: string;
 	readonly isError?: boolean;
+	readonly exitCode?: number;
 }
 
 export interface IPiTurn {

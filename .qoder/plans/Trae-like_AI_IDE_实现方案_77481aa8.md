@@ -149,4 +149,8 @@
 
 实施计划：[Pi 集成计划](../../mytrae/plans/2026-10-17-pi-integration.md)。使用说明：[Pi Agent](../../mytrae/docs/PI-AGENT.md)。确定性测试运行真实 Pi SDK 接本地 HTTP 模型服务，覆盖工具续跑、模式限制、取消、恢复和步数边界；另以本机 Ollama 验证真实 IDE 流程。
 
-M1 已完成前轮独立验收；本次推进 M2 Markdown/上下文与 M4 Pi 接入。M3 ghost text 完整注册和性能验收、M5 sqlite-vec/AST/混合检索尚未完成。签名、公证和升级服务仍属于后续 M6。
+M1 已完成前轮独立验收；M2 Markdown/上下文与 M4 Pi 接入已完成本轮验收（Task 1-4 全绿，含打包版 Ollama 端到端）。M3 行内补全已完成端到端验收（2026-10-17，证据见 `.agent-validation/completion/`）：ghost text 正常渲染、Tab 接受、5 个延迟样本 1090-1260ms 全部 < 1.5s（本机 Ollama，300ms 防抖计入），单元测试 26 例、typecheck/eslint 全绿。验收中修复两处真机问题：sanitize 增加模型回显行前缀剥离；补全 range 改为光标处零宽插入（默认整词替换区间会被编辑器可见性过滤隐藏，导致 ghost text 不出现）。补全模型选型注意：qwen3.5:9b 经 /v1 端点输出全部落入 reasoning、content 为空，不能用作补全模型，验收改用 qwen2.5-coder:1.5b。
+
+M5 代码索引已完成验收（2026-10-17，证据见 `.agent-validation/index/`）。实现相对原设计有两处降级：向量存储用 `node:sqlite` + L2 归一化 float32 BLOB 暴力扫描替代 sqlite-vec（12000 chunk 内扫描毫秒级，暂无性能压力）；分块用自研声明边界 + 缩进/花括号启发式 chunker 替代 tree-sitter。检索为向量 + BM25（内存倒排）+ 路径匹配三路 RRF（k=60）融合。验收数据：`src/vs` 大库首建 4.39min（1215 文件 / 12000 chunk，< 5min 预算，bge-m3 实测 ~47 chunks/s，嵌入输入截断 1200 字符）；小库检索相关性 4/4 命中预期文件；node 套件 32 例 + Electron 套件 135 例、typecheck/eslint 全绿；真机冒烟（launch skill 隔离实例）确认 utility process 在工作台内完成首建与持久化（32 文件 / 265 chunk / dim 1024），settings 变更无需重载即可重建索引。验收过程中修复四处真实缺陷：generation 双重递增导致索引永不执行、fuse 融合分排序方向颠倒、fuse 按存储序而非融合分回填结果、小 chunk 合并的行数语义错误。遗留：MyTrae Chat 视图将请求路由到内置 Copilot 模型而非配置的 `myTrae.provider`（属 M4 Chat 域问题），导致 `search_code` 未能在真机 UI 走通端到端，该路径现由服务端 e2e 与工具接线单测覆盖。
+
+M6 打包发布已完成验收（2026-10-18，证据见 `.agent-validation/release/`）：`npm run mytrae:package:mac` 产出 MyTrae-1.142.0-darwin-arm64.dmg + sha256，校验通过；打包版 e2e（DMG 挂载 → Playwright 管道驱动）验证 Pi agent 回合与代码索引 utility process 均在打包产物内正常工作（`indexReady: true`、`searchCodeAnswered: true`、无 fatal errors）；BUILD.md §5.1 已补充发版流程、签名公证占位、崩溃收集说明（本地 Crashpad，不外发）与日志路径。签名、公证和自动更新服务仍为外部接入事项，本次验收完成 macOS 本机可用的打包基线。

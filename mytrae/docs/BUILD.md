@@ -160,6 +160,43 @@ npm run mytrae:package:mac
 - `mytrae:package:mac` 对产物做 ad-hoc 本地签名并保留 V8 JIT entitlement，输出 `dist/MyTrae-<version>-darwin-arm64.dmg` 与 `.dmg.sha256`。DMG 内包含 app 与 Applications 链接，可拖入 Applications 安装。
 - 尚未做 Developer ID 签名、公证或自动更新，外部分发属于 M6。进入 `dist/` 后校验：`shasum -a 256 -c MyTrae-<version>-darwin-arm64.dmg.sha256`。
 
+### 5.1 发版与运维（M6）
+
+发布一个 macOS 版本的最小流程：
+
+```bash
+npm run mytrae:package:mac                 # 构建 + ad-hoc 签名 + DMG + sha256
+shasum -a 256 -c dist/MyTrae-<version>-darwin-arm64.dmg.sha256
+# 安装级验证：挂载 DMG → 复制 app → Playwright 管道驱动真实回合
+node .agent-validation/release/release-e2e.mjs
+```
+
+打包版 e2e 覆盖两件事：Pi utility process 的真实 agent 回合（工作区标记回读）与代码索引 utility process 的首建持久化（settings 预置 `myTrae.embedding.*` 后直接检查 `index.db` 的 meta/chunks）。脚本为 `.agent-validation/release/release-e2e.mjs`，证据落在 `.agent-validation/release/`。
+
+**签名与公证（占位）**：当前产物为 ad-hoc 本地签名（`resign-dev-app.sh`，保留 V8 JIT entitlement），只能在本机运行。接入 Developer ID 后按以下顺序替换，不要改动 entitlement 内容：
+
+```bash
+codesign --deep --force --options runtime \
+  --entitlements mytrae/tools/darwin.entitlements \
+  --sign "Developer ID Application: <TEAM ID>" "MyTrae - AI Code IDE.app"
+codesign --verify --deep --strict --verbose=2 "MyTrae - AI Code IDE.app"
+xcrun notarytool submit dist/MyTrae-<version>-darwin-arm64.dmg --keychain-profile <PROFILE> --wait
+xcrun stapler staple dist/MyTrae-<version>-darwin-arm64.dmg
+```
+
+自动更新（`update.mode` / 更新服务）尚未接入，升级目前是手动换装。
+
+**崩溃收集**：本 fork 无崩溃上传服务（`product.json` 不含 `appCenter`，`src/mainImpl.ts` 中 `uploadToServer` 恒为 false），Crashpad 只在本地落盘，不会外发：
+
+- 默认**不启用**崩溃 dump 收集（上游同逻辑：需 argv.json 或命令行开关显式开启）。
+- 启用方式一：`--crash-reporter-directory=<绝对路径>` 启动，dump 直接写入该目录（推荐，路径可控）。
+- 启用方式二：在 `~/.mytrae/argv.json` 写 `"enable-crash-reporter": true`，dump 落在 Electron 默认 `crashDumps` 位置（userData 下 Crashpad 目录）。
+- dump 为 `.dmp` 文件，可用 `lldb` / Chromium `minidump_stackwalk` 解析；`render-process-gone` 等渲染进程异常仍会记录在主日志。
+
+**日志位置**：运行日志按时间戳分目录存放在 `<userData>/logs/<yyyymmddThhmmss>/`。默认 userData：macOS 为 `~/Library/Application Support/MyTrae`（取 `product.nameShort`；开发态固定 `code-oss-dev`；指定 `--user-data-dir` 时以参数为准）。关键文件：`main.log`（主进程）、`window renderer.log`（渲染进程）、`window/exthost/exthost.log`（扩展宿主）、`window renderer.log` 内含 `[mytrae index]`（代码索引 utility process 的状态经渲染代理转发）与 Pi Agent 相关条目。会话数据见 §7.3。
+
+依赖打包回归点：Pi SDK 依赖 asar 与 `pi-ai` 模型清单注入，见文末「Pi Agent」章节；改动依赖过滤链后必须重跑打包版 e2e。
+
 ---
 
 ## 6. 品牌与运行时定制
@@ -225,7 +262,8 @@ OpenAI、Anthropic、DeepSeek（默认）、通义千问、Moonshot、智谱、O
 
 对话会话以 JSONL 持久化在
 `<userRoamingDataHome>/mytrae/chat-sessions.jsonl`
-（macOS 为 `~/Library/Application Support/MyTrae - AI Code IDE/mytrae/chat-sessions.jsonl`），
+（macOS 打包版默认为 `~/Library/Application Support/MyTrae/User/mytrae/chat-sessions.jsonl`；
+`userRoamingDataHome = <userData>/User`，开发态在 `code-oss-dev` 目录下），
 最多保留 50 个会话，写入带防抖。
 
 ---
@@ -335,3 +373,5 @@ npm run eslint -- src/vs/platform/ai src/vs/workbench/contrib/ai
 ```
 
 Node Host 与网页网络边界测试使用真实 Pi SDK 和确定性 HTTP 服务，单独使用 Node 测试入口运行，避免把 Node SDK 导入浏览器。安装包仍运行 `npm run mytrae:package:mac`；运行打包后的程序需再次验证 Pi utility process 能加载生产依赖。
+
+打包验证（2026-10-17 已跑通）：Pi SDK 经 esbuild `packages: 'external'` 保留为 asar 内 npm 依赖，`gulpfile.vscode.ts` 的依赖过滤器按设计不枚举 dotfile，Pi 的模型清单 `pi-ai/dist/providers/data/.manifest.json` 由打包脚本单独注入 `node_modules.asar`，改动依赖过滤链时需回归这一点。端到端 smoke 用 Playwright `_electron.launch` 管道驱动（本机 CDP HTTP 发现端口会被并发探测干扰，不要依赖 `--remote-debugging-port` 轮询），脚本见 `.agent-validation/pi/pkg-e2e.mjs`，打包版 Ollama 真实回合读出了工作区标记。

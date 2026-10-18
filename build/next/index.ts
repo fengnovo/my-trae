@@ -106,6 +106,7 @@ const desktopEntryPoints = [
 	'vs/platform/files/node/watcher/watcherMain',
 	'vs/platform/localTranscription/node/localTranscriptionMain',
 	'vs/platform/ai/node/piAgentMain',
+	'vs/platform/ai/node/codeIndexMain',
 	'vs/platform/terminal/node/ptyHostMain',
 	'vs/platform/agentHost/node/agentHostMain',
 	'vs/platform/agentHost/node/diffWorkerMain',

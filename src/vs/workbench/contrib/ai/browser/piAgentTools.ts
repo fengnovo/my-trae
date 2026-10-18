@@ -15,7 +15,9 @@ import { IBulkEditService, ResourceFileEdit, ResourceTextEdit } from '../../../.
 import { IModelService } from '../../../../editor/common/services/model.js';
 import { ITextModelService } from '../../../../editor/common/services/resolverService.js';
 import { localize } from '../../../../nls.js';
+import { AIConfig } from '../../../../platform/ai/common/aiConfiguration.js';
 import { IPiToolRequest, IPiToolResult } from '../../../../platform/ai/common/piAgent.js';
+import { ICodeIndexService } from '../../../../platform/ai/common/codeIndex.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { InMemoryFileSystemProvider } from '../../../../platform/files/common/inMemoryFilesystemProvider.js';
@@ -65,6 +67,7 @@ export class PiAgentTools extends Disposable {
 		@IStorageService private readonly storageService: IStorageService,
 		@IConfigurationService private readonly configurationService: IConfigurationService,
 		@ITextFileService private readonly textFileService: ITextFileService,
+		@ICodeIndexService private readonly indexService: ICodeIndexService,
 	) {
 		super();
 		this._register(fileService.registerProvider(this.memoryScheme, this._register(new InMemoryFileSystemProvider())));
@@ -92,7 +95,8 @@ export class PiAgentTools extends Disposable {
 			try {
 				this.checkActive(generation, signal);
 				assertPiToolAllowed(request.name, request.mode, this.trustService.isWorkspaceTrusted());
-				return { text: this.bound(await this.run(request, generation, signal)) };
+				const result = await this.run(request, generation, signal);
+				return typeof result === 'string' ? { text: this.bound(result) } : { ...result, text: this.bound(result.text) };
 			} catch (error) {
 				return { text: this.bound(getErrorMessage(error)), isError: true };
 			}
@@ -100,6 +104,8 @@ export class PiAgentTools extends Disposable {
 		this.pending = result.then(() => undefined);
 		return result;
 	}
+
+	private get fullAccess(): boolean { return this.configurationService.getValue<string>(AIConfig.AgentAccessMode) === 'fullAccess'; }
 
 	private root(): URI {
 		const root = this.workspaceService.getWorkspace().folders[0]?.uri;
@@ -170,7 +176,7 @@ export class PiAgentTools extends Disposable {
 		return (await this.fileService.readFile(resource, { limits: { size: maxFile } })).value.toString();
 	}
 
-	private async run(request: IPiToolRequest, generation: number, signal?: AbortSignal): Promise<string> {
+	private async run(request: IPiToolRequest, generation: number, signal?: AbortSignal): Promise<string | IPiToolResult> {
 		const args = request.arguments;
 		switch (request.name) {
 			case 'read_file': {
@@ -181,7 +187,8 @@ export class PiAgentTools extends Disposable {
 			}
 			case 'list_dir': {
 				const stat = await this.fileService.resolve(await this.safeResource(args.path ?? ''));
-				return (stat.children ?? []).slice(0, 500).map(child => `${child.name}${child.isSymbolicLink ? ' [symlink, blocked]' : child.isDirectory ? '/' : ''}`).join('\n');
+				const children = stat.children ?? [];
+				return children.length === 0 ? localize('pi.emptyDirectory', "The directory is empty.") : children.slice(0, 500).map(child => `${child.name}${child.isSymbolicLink ? ' [symlink, blocked]' : child.isDirectory ? '/' : ''}`).join('\n');
 			}
 			case 'search_code': return this.search(args.path ?? '', args.query ?? '', args.maxResults ?? 30, generation, signal);
 			case 'get_diagnostics': {
@@ -209,7 +216,7 @@ export class PiAgentTools extends Disposable {
 					throw new Error(localize('pi.commandRequired', "Supply a terminal command."));
 				}
 				const cwd = await this.safeResource(args.path ?? '');
-				const confirmation = await this.dialogService.confirm({ type: 'warning', message: localize('pi.runCommand', "Run this agent command?"), detail: localize('pi.commandDetail', "Working directory: {0}\n\n{1}\n\nCommands can modify files and access resources outside the workspace. Command changes are not covered by agent rollback.", cwd.fsPath, command), primaryButton: localize('pi.run', "Run Command") });
+				const confirmation = this.fullAccess ? { confirmed: true } : await this.dialogService.confirm({ type: 'warning', message: localize('pi.runCommand', "Run this agent command?"), detail: localize('pi.commandDetail', "Working directory: {0}\n\n{1}\n\nCommands can modify files and access resources outside the workspace. Command changes are not covered by agent rollback.", cwd.fsPath, command), primaryButton: localize('pi.run', "Run Command") });
 				this.checkActive(generation, signal);
 				if (!confirmation.confirmed) {
 					throw new Error(localize('pi.declined', "User declined the agent action."));
@@ -240,9 +247,32 @@ export class PiAgentTools extends Disposable {
 		if (!query) {
 			throw new Error(localize('pi.queryRequired', "Supply a nonempty search query."));
 		}
+		const limit = Math.max(1, Math.min(100, maxResults));
+		const semantic = await this.semanticSearch(query, Math.min(8, limit));
+		this.checkActive(generation, signal);
+		const lexical = await this.lexicalSearch(path, query, limit, generation, signal);
+		if (!semantic) {
+			return lexical;
+		}
+		return `${semantic}\n${lexical ? `\n${lexical}` : localize('pi.searchNoLexical', "\n[No further literal matches]")}`;
+	}
+
+	/** Vector + keyword retrieval from the workspace index; empty when it is unavailable. */
+	private async semanticSearch(query: string, maxResults: number): Promise<string> {
+		try {
+			const hits = await this.indexService.search({ text: query, maxResults });
+			if (hits.length === 0) {
+				return '';
+			}
+			return localize('pi.searchSemantic', "Semantic matches from the workspace index:") + '\n' + hits.map(hit => `${hit.path}:${hit.startLine}-${hit.endLine}\n${hit.text.slice(0, 600)}`).join('\n\n');
+		} catch (error) {
+			return localize('pi.searchSemanticUnavailable', "[Workspace index unavailable: {0}]", getErrorMessage(error));
+		}
+	}
+
+	private async lexicalSearch(path: string, query: string, limit: number, generation: number, signal?: AbortSignal): Promise<string> {
 		const queue = [await this.safeResource(path)];
 		const results: string[] = [];
-		const limit = Math.max(1, Math.min(100, maxResults));
 		let visited = 0;
 		while (queue.length && visited++ < 1000 && results.length < limit) {
 			this.checkActive(generation, signal);
@@ -272,7 +302,7 @@ export class PiAgentTools extends Disposable {
 	}
 
 	/** Capture correlated shell-integration output when available; never infer success from sending text. */
-	private async runTerminal(terminal: ITerminalInstance, command: string, generation: number, signal?: AbortSignal): Promise<string> {
+	private async runTerminal(terminal: ITerminalInstance, command: string, generation: number, signal?: AbortSignal): Promise<IPiToolResult> {
 		const resources = new DisposableStore();
 		const cancellation = this.cancellation(generation, signal, resources);
 		resources.add(cancellation.token.onCancellationRequested(() => terminal.dispose()));
@@ -295,18 +325,18 @@ export class PiAgentTools extends Disposable {
 			if (!detection?.hasRichCommandDetection) {
 				await raceCancellationError(terminal.sendText(command, true), cancellation.token);
 				this.checkActive(generation, signal);
-				return localize('pi.terminalOutput', "Command sent to the IDE terminal. Inspect its output there: completion, exit status, and output are not captured by this tool. Do not assume success.");
+				return { text: localize('pi.terminalOutput', "Command sent to the IDE terminal. Inspect its output there: completion, exit status, and output are not captured by this tool. Do not assume success.") };
 			}
 			const id = generateUuid();
-			const completion = new Promise<string>(resolve => {
+			const completion = new Promise<IPiToolResult>(resolve => {
 				resources.add(detection.onCommandFinished(finished => {
 					if (finished.id === id) {
-						resolve(localize('pi.commandFinished', "Exit code: {0}\n{1}", finished.exitCode ?? localize('pi.exitUnknown', "unknown"), this.bound(finished.getOutput() ?? localize('pi.noOutput', "No output was captured."))));
+						resolve({ text: localize('pi.commandFinished', "Exit code: {0}\n{1}", finished.exitCode ?? localize('pi.exitUnknown', "unknown"), this.bound(finished.getOutput() ?? localize('pi.noOutput', "No output was captured."))), ...(typeof finished.exitCode === 'number' ? { exitCode: finished.exitCode, ...(finished.exitCode !== 0 ? { isError: true } : {}) } : {}) });
 					}
 				}));
-				resources.add(terminal.onExit(() => resolve(localize('pi.terminalExited', "The terminal exited before correlated command output was available. Inspect the terminal."))));
-				resources.add(disposableTimeout(() => resolve(localize('pi.commandTimeout', "Output capture timed out after 60 seconds. The command may still be running in the IDE terminal.")), 60000));
-				resources.add(cancellation.token.onCancellationRequested(() => resolve(localize('pi.commandCancelled', "Agent command cancelled and its dedicated terminal closed."))));
+				resources.add(terminal.onExit(() => resolve({ text: localize('pi.terminalExited', "The terminal exited before correlated command output was available. Inspect the terminal.") })));
+				resources.add(disposableTimeout(() => resolve({ text: localize('pi.commandTimeout', "Output capture timed out after 60 seconds. The command may still be running in the IDE terminal.") }), 60000));
+				resources.add(cancellation.token.onCancellationRequested(() => resolve({ text: localize('pi.commandCancelled', "Agent command cancelled and its dedicated terminal closed.") })));
 			});
 			this.checkActive(generation, signal);
 			await raceCancellationError(terminal.runCommand(command, true, id), cancellation.token);
@@ -335,7 +365,7 @@ export class PiAgentTools extends Disposable {
 			const modified = store.add(await this.textModelService.createSyntheticDocument(after ?? '', null));
 			await this.editorService.openEditor({ original: { resource: original.object.textEditorModel.uri }, modified: { resource: modified.object.textEditorModel.uri }, label: localize('pi.preview', "Agent Edit Preview: {0}", resource.path) });
 			this.checkActive(generation, signal);
-			const approval = await this.dialogService.confirm({ type: 'warning', message: localize('pi.applyEdit', "Apply the previewed agent edit?"), detail: resource.fsPath, primaryButton: localize('pi.apply', "Apply Edit") });
+			const approval = this.fullAccess ? { confirmed: true } : await this.dialogService.confirm({ type: 'warning', message: localize('pi.applyEdit', "Apply the previewed agent edit?"), detail: resource.fsPath, primaryButton: localize('pi.apply', "Apply Edit") });
 			this.checkActive(generation, signal);
 			if (!approval.confirmed) {
 				throw new Error(localize('pi.declined', "User declined the agent action."));
@@ -349,18 +379,20 @@ export class PiAgentTools extends Disposable {
 			const edits = after === undefined ? [new ResourceFileEdit(resource, undefined)] : reference ? [new ResourceTextEdit(resource, { range: reference.object.textEditorModel.getFullModelRange(), text: after }, version)] : [new ResourceFileEdit(undefined, resource, { overwrite: false, contents: Promise.resolve(VSBuffer.fromString(after)) })];
 			const key = resource.toString();
 			const previous = this.checkpoints.get(key);
-			if (checkpoint && after !== undefined) {
-				// Capture before the first modification, not after a potentially partial operation.
-				this.checkpoints.set(key, { resource, original: previous ? previous.original : before, lastWrite: after, diskAtWrite: before === undefined ? after : diskBefore });
-			}
 			const result = await this.bulkEditService.apply(edits, { label: localize('pi.editLabel', "Pi Agent Edit"), confirmBeforeUndo: true, token: cancellation.token });
 			if (!result.isApplied) {
-				if (checkpoint && generation === this.generation) {
-					if (previous) { this.checkpoints.set(key, previous); } else { this.checkpoints.delete(key); }
-				}
 				throw new Error(localize('pi.notApplied', "The edit was not applied."));
 			}
+			// A cancelled token makes BulkEditService skip every edit while still reporting
+			// success, so liveness must be verified before trusting `isApplied`.
 			this.checkActive(generation, signal);
+			if (checkpoint && after !== undefined) {
+				// Record only after the mutation actually landed so an aborted/no-op apply
+				// cannot leave a false checkpoint that rollback would mistake for a
+				// subsequent user edit. Values still describe the state captured before
+				// the first modification.
+				this.checkpoints.set(key, { resource, original: previous ? previous.original : before, lastWrite: after, diskAtWrite: before === undefined ? after : diskBefore });
+			}
 		} finally {
 			store.dispose();
 		}
@@ -417,7 +449,7 @@ export class PiAgentTools extends Disposable {
 		}
 		const version = model.getVersionId();
 		await this.editorService.openEditor({ resource: model.uri, options: { pinned: true } });
-		const approval = await this.dialogService.confirm({ message: localize('pi.remember', "Append this text to project memory?"), detail: content, primaryButton: localize('pi.saveMemory', "Save Memory") });
+		const approval = this.fullAccess ? { confirmed: true } : await this.dialogService.confirm({ message: localize('pi.remember', "Append this text to project memory?"), detail: content, primaryButton: localize('pi.saveMemory', "Save Memory") });
 		this.checkActive(generation, signal);
 		if (!approval.confirmed || model.getVersionId() !== version) {
 			throw new Error(localize('pi.memoryDeclined', "Memory was changed or approval was declined. No agent text was saved."));

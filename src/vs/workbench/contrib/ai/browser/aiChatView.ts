@@ -4,6 +4,9 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as DOM from '../../../../base/browser/dom.js';
+import { IManagedHover } from '../../../../base/browser/ui/hover/hover.js';
+import { getDefaultHoverDelegate } from '../../../../base/browser/ui/hover/hoverDelegateFactory.js';
+import { toAction } from '../../../../base/common/actions.js';
 import { RunOnceScheduler } from '../../../../base/common/async.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { toErrorMessage } from '../../../../base/common/errorMessage.js';
@@ -14,10 +17,11 @@ import { URI } from '../../../../base/common/uri.js';
 import { ICodeEditorService } from '../../../../editor/browser/services/codeEditorService.js';
 import { localize } from '../../../../nls.js';
 import { ILLMService } from '../../../../platform/ai/common/ai.js';
-import { readAIConfiguration } from '../../../../platform/ai/common/aiConfiguration.js';
+import { AIConfig, readAIConfiguration } from '../../../../platform/ai/common/aiConfiguration.js';
 import { PiAgentMode } from '../../../../platform/ai/common/piAgent.js';
+import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
-import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
+import { ConfigurationTarget, IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
 import { IContextMenuService } from '../../../../platform/contextview/browser/contextView.js';
 import { IHoverService } from '../../../../platform/hover/browser/hover.js';
@@ -34,6 +38,7 @@ import { IWorkspaceContextService } from '../../../../platform/workspace/common/
 import { ViewPane } from '../../../browser/parts/views/viewPane.js';
 import { IViewletViewOptions } from '../../../browser/parts/views/viewsViewlet.js';
 import { IViewDescriptorService } from '../../../common/views.js';
+import { MANAGE_TRUST_COMMAND_ID } from '../../workspace/common/workspace.js';
 import {
 	ISearchService,
 	QueryType,
@@ -66,6 +71,7 @@ export class AIChatViewPane extends ViewPane {
 	private readonly bannerDisposables = this._register(new DisposableStore());
 	private readonly filePickerScheduler = this._register(new RunOnceScheduler(() => void this.pickFile(), 200));
 	private readonly expandedTools = new Set<string>();
+	private readonly buttonHovers = new Map<HTMLButtonElement, IManagedHover>();
 	private pickerOpen = false;
 	private submitting = false;
 	private changingSession = false;
@@ -78,12 +84,16 @@ export class AIChatViewPane extends ViewPane {
 	private messagesContainer!: HTMLElement;
 	private inputArea!: HTMLTextAreaElement;
 	private sendButton!: HTMLButtonElement;
-	private statusElement!: HTMLElement;
 	private modeSelect!: HTMLSelectElement;
-	private sessionSelect!: HTMLSelectElement;
+	private sessionTitle!: HTMLElement;
+	private historyButton!: HTMLButtonElement;
 	private newSessionButton!: HTMLButtonElement;
-	private deleteSessionButton!: HTMLButtonElement;
+	private moreButton!: HTMLButtonElement;
 	private rollbackButton!: HTMLButtonElement;
+	private modelButton!: HTMLButtonElement;
+	private modelLabel!: HTMLElement;
+	private accessLabel!: HTMLElement;
+	private accessButton!: HTMLButtonElement;
 	private planContainer!: HTMLElement;
 
 	/** Context attached to the message that is about to be sent. */
@@ -110,6 +120,7 @@ export class AIChatViewPane extends ViewPane {
 		private readonly workspaceContextService: IWorkspaceContextService,
 		@IMarkdownRendererService private readonly markdownRendererService: IMarkdownRendererService,
 		@ICommandService private readonly commandService: ICommandService,
+		@IClipboardService private readonly clipboardService: IClipboardService,
 	) {
 		super(
 			options,
@@ -124,6 +135,9 @@ export class AIChatViewPane extends ViewPane {
 			hoverService,
 		);
 
+		this._register(this.aiConfigurationService.onDidChangeConfiguration(event => {
+			if (event.affectsConfiguration(AIConfig.AgentAccessMode) && this.root) { this.renderSession(this.chatService.activeSession); }
+		}));
 		this._register(
 			this.chatService.onDidChange(() => this.renderSession(this.chatService.activeSession)),
 		);
@@ -146,15 +160,14 @@ export class AIChatViewPane extends ViewPane {
 
 		this.renderToolbar();
 
-		this.contextRow = DOM.append(this.root, $('.mytrae-chat-context-row'));
-		this.contextRow.style.display = 'none';
-
 		this.messagesContainer = DOM.append(this.root, $('.mytrae-chat-messages'));
 		this.messagesContainer.setAttribute('role', 'log');
 		this.messagesContainer.setAttribute('aria-live', 'polite');
 		this.planContainer = DOM.append(this.root, $('.mytrae-chat-plan'));
 
-		const inputRow = DOM.append(this.root, $('.mytrae-chat-input-row'));
+		const inputRow = DOM.append(this.root, $('.mytrae-chat-input-row.mytrae-chat-composer'));
+		this.contextRow = DOM.append(inputRow, $('.mytrae-chat-context-row'));
+		this.contextRow.style.display = 'none';
 		this.inputArea = DOM.append(inputRow, $('textarea.mytrae-chat-input'));
 		this.inputArea.placeholder = localize(
 			'myTrae.chat.placeholder',
@@ -167,33 +180,50 @@ export class AIChatViewPane extends ViewPane {
 		this.inputArea.rows = 3;
 
 		const actions = DOM.append(inputRow, $('.mytrae-chat-actions'));
-		const attachButton = DOM.append(actions, $('button.mytrae-chat-action'));
-		attachButton.className = `mytrae-chat-action ${ThemeIcon.asClassName(Codicon.fileAdd)}`;
-		attachButton.title = localize(
-			'myTrae.chat.attachActiveFile',
-			"Attach Active File",
-		);
-		attachButton.setAttribute('aria-label', attachButton.title);
-		this._register(
-			DOM.addDisposableListener(attachButton, 'click', () =>
-				this.attachActiveEditor(false),
-			),
-		);
-		const selectionButton = DOM.append(actions, $('button.mytrae-chat-action'));
-		selectionButton.classList.add(...ThemeIcon.asClassName(Codicon.selection).split(' '));
-		selectionButton.title = localize('myTrae.chat.attachSelection', "Attach Selection");
-		selectionButton.setAttribute('aria-label', selectionButton.title);
-		this._register(DOM.addDisposableListener(selectionButton, 'click', () => this.attachActiveEditor(true)));
+		const attachButton = this.iconButton(actions, Codicon.add, localize('myTrae.chat.addContext', "Add Context"));
+		attachButton.setAttribute('aria-haspopup', 'menu');
+		this._register(DOM.addDisposableListener(attachButton, 'click', () => {
+			this.contextMenuService.showContextMenu({
+				getAnchor: () => attachButton,
+				getActions: () => [
+					toAction({ id: 'mytrae.attachFile', label: localize('myTrae.chat.attachActiveFile', "Attach Active File"), run: () => this.attachActiveEditor(false) }),
+					toAction({ id: 'mytrae.attachSelection', label: localize('myTrae.chat.attachSelection', "Attach Selection"), run: () => this.attachActiveEditor(true) }),
+					toAction({ id: 'mytrae.attachCodebase', label: localize('myTrae.chat.pickCodebase', "Search this codebase"), run: () => this.addContext({ kind: AIChatContextKind.Codebase, label: 'codebase' }) }),
+				],
+			});
+		}));
 
-		this.sendButton = DOM.append(actions, $('button.mytrae-chat-send'));
-		this.sendButton.textContent = localize('myTrae.chat.send', "Send");
+		const accessButton = this.accessButton = this.iconButton(actions, Codicon.shield, localize('myTrae.chat.toolAccess', "Tool Access"));
+		accessButton.classList.add('mytrae-chat-control', 'mytrae-chat-access');
+		accessButton.setAttribute('aria-haspopup', 'menu');
+		this.accessLabel = DOM.append(accessButton, $('span.mytrae-chat-control-label'));
+		this.appendIcon(accessButton, Codicon.chevronDown);
+		this._register(DOM.addDisposableListener(accessButton, 'click', () => {
+			this.contextMenuService.showContextMenu({
+				getAnchor: () => accessButton,
+				getActions: () => [
+					toAction({ id: 'mytrae.accessReview', label: localize('myTrae.chat.accessReview', "提示人工审核"), checked: this.aiConfigurationService.getValue<string>(AIConfig.AgentAccessMode) !== 'fullAccess', run: () => this.aiConfigurationService.updateValue(AIConfig.AgentAccessMode, 'review', ConfigurationTarget.USER) }),
+					toAction({ id: 'mytrae.accessFull', label: localize('myTrae.chat.accessFull', "完全访问"), checked: this.aiConfigurationService.getValue<string>(AIConfig.AgentAccessMode) === 'fullAccess', run: () => this.aiConfigurationService.updateValue(AIConfig.AgentAccessMode, 'fullAccess', ConfigurationTarget.USER) }),
+					toAction({ id: MANAGE_TRUST_COMMAND_ID, label: localize('myTrae.chat.manageTrust', "Manage Workspace Trust..."), run: () => this.commandService.executeCommand(MANAGE_TRUST_COMMAND_ID) }),
+				],
+			});
+		}));
+		this.renderModeControl(actions);
+		const modelActions = DOM.append(actions, $('.mytrae-chat-model-actions'));
+		this.modelButton = this.iconButton(modelActions, undefined, localize('myTrae.chat.selectModel', "Select Model"));
+		this.modelButton.classList.add('mytrae-chat-control', 'mytrae-chat-model');
+		this.modelButton.setAttribute('aria-haspopup', 'dialog');
+		this.modelLabel = DOM.append(this.modelButton, $('span.mytrae-chat-control-label'));
+		this.appendIcon(this.modelButton, Codicon.chevronDown);
+		this._register(DOM.addDisposableListener(this.modelButton, 'click', () => void this.pickModel()));
+
+		this.sendButton = this.iconButton(modelActions, Codicon.arrowUp, localize('myTrae.chat.send', "Send"));
+		this.sendButton.classList.add('mytrae-chat-send');
 		this._register(
 			DOM.addDisposableListener(this.sendButton, 'click', () =>
 				this.onSendClicked(),
 			),
 		);
-
-		this.statusElement = DOM.append(this.root, $('.mytrae-chat-status'));
 
 		this._register(
 			DOM.addDisposableListener(this.inputArea, 'keydown', (event) =>
@@ -233,19 +263,51 @@ export class AIChatViewPane extends ViewPane {
 		const toolbar = DOM.append(this.root, $('.mytrae-chat-toolbar'));
 		toolbar.setAttribute('role', 'group');
 		toolbar.setAttribute('aria-label', localize('myTrae.chat.controls', "Conversation Controls"));
-		this.modeSelect = DOM.append(toolbar, $('select.mytrae-chat-mode'));
+		this.sessionTitle = DOM.append(toolbar, $('.mytrae-chat-session-title'));
+		this._register(this.hoverService.setupManagedHover(getDefaultHoverDelegate('mouse'), this.sessionTitle, () => this.sessionTitle.textContent ?? ''));
+		const actions = DOM.append(toolbar, $('.mytrae-chat-toolbar-actions'));
+		this.newSessionButton = this.iconButton(actions, Codicon.commentAdd, localize('myTrae.chat.newSessionLabel', "New Conversation"));
+		this._register(DOM.addDisposableListener(this.newSessionButton, 'click', () => {
+			void this.runSessionAction(async () => { await this.chatService.createSession(); });
+		}));
+		this.historyButton = this.iconButton(actions, Codicon.history, localize('myTrae.chat.history', "Conversation History"));
+		this.historyButton.setAttribute('aria-haspopup', 'dialog');
+		this._register(DOM.addDisposableListener(this.historyButton, 'click', () => void this.pickSession()));
+		this.rollbackButton = this.iconButton(actions, Codicon.discard, localize('myTrae.chat.rollback', "Roll Back Changes"));
+		this.rollbackButton.hidden = !this.chatService.rollback;
+		this._register(DOM.addDisposableListener(this.rollbackButton, 'click', () => {
+			void this.runSessionAction(async () => this.chatService.rollback?.());
+		}));
+		this.moreButton = this.iconButton(actions, Codicon.ellipsis, localize('myTrae.chat.moreActions', "More Conversation Actions"));
+		this.moreButton.setAttribute('aria-haspopup', 'menu');
+		this._register(DOM.addDisposableListener(this.moreButton, 'click', () => {
+			this.contextMenuService.showContextMenu({
+				getAnchor: () => this.moreButton,
+				getActions: () => [
+					toAction({ id: 'mytrae.deleteConversation', label: localize('myTrae.chat.deleteSessionLabel', "Delete Conversation"), enabled: !!this.chatService.activeSession, run: () => this.runSessionAction(async () => { const session = this.chatService.activeSession; if (session) { await this.chatService.deleteSession(session.id); } }) }),
+					toAction({ id: 'mytrae.openSettings', label: localize('myTrae.chat.openSettings', "Open Settings"), run: () => this.commandService.executeCommand('workbench.action.openSettings', 'myTrae') }),
+				],
+			});
+		}));
+	}
+
+	private renderModeControl(container: HTMLElement): void {
+		const control = DOM.append(container, $('.mytrae-chat-control.mytrae-chat-mode-control'));
+		control.hidden = !this.chatService.setMode;
+		this.appendIcon(control, Codicon.sparkle);
+		this.modeSelect = DOM.append(control, $('select.mytrae-chat-mode'));
 		this.modeSelect.setAttribute('aria-label', localize('myTrae.chat.mode', "Agent Mode"));
 		const modes: readonly { value: PiAgentMode; label: string }[] = [
 			{ value: 'chat', label: localize('myTrae.chat.modeChat', "Chat") },
 			{ value: 'plan', label: localize('myTrae.chat.modePlan', "Plan") },
-			{ value: 'build', label: localize('myTrae.chat.modeBuild', "Build") },
+			{ value: 'build', label: localize('myTrae.chat.modeAgent', "Agent") },
 		];
 		for (const mode of modes) {
 			const option = DOM.append(this.modeSelect, $<HTMLOptionElement>('option'));
 			option.value = mode.value;
 			option.textContent = mode.label;
 		}
-		this.modeSelect.hidden = !this.chatService.setMode;
+		this.appendIcon(control, Codicon.chevronDown);
 		this._register(DOM.addDisposableListener(this.modeSelect, 'change', () => {
 			const mode = this.modeSelect.value;
 			if (mode === 'chat' || mode === 'plan' || mode === 'build') {
@@ -253,33 +315,50 @@ export class AIChatViewPane extends ViewPane {
 				this.renderControls();
 			}
 		}));
+	}
 
-		this.sessionSelect = DOM.append(toolbar, $('select.mytrae-chat-session'));
-		this.sessionSelect.setAttribute('aria-label', localize('myTrae.chat.session', "Conversation"));
-		this._register(DOM.addDisposableListener(this.sessionSelect, 'change', () => {
-			void this.runSessionAction(async () => this.chatService.setActiveSession(this.sessionSelect.value));
-		}));
-		this.newSessionButton = DOM.append(toolbar, $('button.mytrae-chat-action'));
-		this.newSessionButton.textContent = localize('myTrae.chat.newSession', "New");
-		this.newSessionButton.setAttribute('aria-label', localize('myTrae.chat.newSessionLabel', "New Conversation"));
-		this._register(DOM.addDisposableListener(this.newSessionButton, 'click', () => {
-			void this.runSessionAction(async () => { await this.chatService.createSession(); });
-		}));
-		this.deleteSessionButton = DOM.append(toolbar, $('button.mytrae-chat-action'));
-		this.deleteSessionButton.textContent = localize('myTrae.chat.deleteSession', "Delete");
-		this.deleteSessionButton.setAttribute('aria-label', localize('myTrae.chat.deleteSessionLabel', "Delete Conversation"));
-		this._register(DOM.addDisposableListener(this.deleteSessionButton, 'click', () => {
-			const session = this.chatService.activeSession;
-			if (session) {
-				void this.runSessionAction(async () => this.chatService.deleteSession(session.id));
-			}
-		}));
-		this.rollbackButton = DOM.append(toolbar, $('button.mytrae-chat-action'));
-		this.rollbackButton.textContent = localize('myTrae.chat.rollback', "Roll Back Changes");
-		this.rollbackButton.hidden = !this.chatService.rollback;
-		this._register(DOM.addDisposableListener(this.rollbackButton, 'click', () => {
-			void this.runSessionAction(async () => this.chatService.rollback?.());
-		}));
+	private appendIcon(container: HTMLElement, icon: ThemeIcon): void {
+		const element = DOM.append(container, $('span'));
+		element.classList.add(...ThemeIcon.asClassName(icon).split(' '));
+		element.setAttribute('aria-hidden', 'true');
+	}
+
+	private iconButton(container: HTMLElement, icon: ThemeIcon | undefined, label: string): HTMLButtonElement {
+		const button = DOM.append(container, $<HTMLButtonElement>('button.mytrae-chat-action'));
+		button.type = 'button';
+		button.setAttribute('aria-label', label);
+		if (icon) { this.appendIcon(button, icon); }
+		this.buttonHovers.set(button, this._register(this.hoverService.setupManagedHover(getDefaultHoverDelegate('mouse'), button, label)));
+		return button;
+	}
+
+	private async pickSession(): Promise<void> {
+		await this.runSessionAction(async () => {
+			const selected = await this.quickInputService.pick(this.chatService.sessions.map(session => ({
+				label: session.title || localize('myTrae.chat.untitled', "New Conversation"),
+				description: session.id === this.chatService.activeSession?.id ? localize('myTrae.chat.currentSession', "Current") : undefined,
+				sessionId: session.id,
+			})), { placeHolder: localize('myTrae.chat.pickSession', "Search conversation history") });
+			if (selected && !this.messageDisposables.isDisposed) { await this.chatService.setActiveSession(selected.sessionId); }
+		});
+	}
+
+	private async pickModel(): Promise<void> {
+		await this.runSessionAction(async () => {
+			const configuration = readAIConfiguration(this.aiConfigurationService);
+			const current = this.chatService.setMode ? configuration.agentModel || configuration.chatModel : configuration.chatModel;
+			const models = this.llmService.listModels().filter(model => model.provider === configuration.providerId && model.id !== current);
+			const items: (IQuickPickItem & { modelId?: string })[] = [
+				{ label: current, description: localize('myTrae.chat.currentModel', "Current Model"), modelId: current },
+				...models.map(model => ({ label: model.label, description: model.id, modelId: model.id })),
+				{ label: localize('myTrae.chat.customModel', "Enter Model ID..."), description: configuration.providerId },
+			];
+			const selected = await this.quickInputService.pick(items, { placeHolder: localize('myTrae.chat.pickModel', "Select a model for this provider"), matchOnDescription: true });
+			if (!selected || this.messageDisposables.isDisposed) { return; }
+			const model = selected.modelId ?? await this.quickInputService.input({ prompt: localize('myTrae.chat.modelId', "Enter a model ID supported by your provider"), value: current });
+			if (!model?.trim() || this.messageDisposables.isDisposed) { return; }
+			await this.aiConfigurationService.updateValue(this.chatService.setMode ? AIConfig.AgentModel : AIConfig.Model, model.trim());
+		});
 	}
 
 	private renderSession(session: IAIChatSession | undefined): void {
@@ -313,14 +392,11 @@ export class AIChatViewPane extends ViewPane {
 				}
 			}
 		}
-
-		DOM.clearNode(this.sessionSelect);
-		for (const candidate of this.chatService.sessions) {
-			const option = DOM.append(this.sessionSelect, $<HTMLOptionElement>('option'));
-			option.value = candidate.id;
-			option.textContent = candidate.title || localize('myTrae.chat.untitled', "New Conversation");
-			option.selected = candidate.id === session?.id;
+		if (this.chatService.isStreaming && !turns.some(turn => turn.pending)) {
+			this.renderPending(this.messagesContainer, false);
 		}
+
+		this.sessionTitle.textContent = session?.title || localize('myTrae.chat.untitled', "New Conversation");
 		this.renderPlan();
 		this.renderContextChips();
 		this.renderControls();
@@ -361,6 +437,9 @@ export class AIChatViewPane extends ViewPane {
 	}
 
 	private renderTurn(turn: IAIChatTurn, followOutput: boolean): void {
+		if (turn.role === AIChatRole.Assistant && !turn.content.trim() && !turn.pending && !turn.error) {
+			return;
+		}
 		if (turn.role === AIChatRole.Tool) {
 			const details = DOM.append(this.messagesContainer, $<HTMLDetailsElement>('details.mytrae-chat-tool'));
 			details.open = this.expandedTools.has(turn.id);
@@ -386,10 +465,29 @@ export class AIChatViewPane extends ViewPane {
 			$(isUser ? '.mytrae-chat-turn.user' : '.mytrae-chat-turn.assistant'),
 		);
 
-		const role = DOM.append(element, $('.mytrae-chat-role'));
-		role.textContent = isUser
-			? localize('myTrae.chat.roleUser', "You")
-			: localize('myTrae.chat.roleAssistant', "MyTrae");
+		element.setAttribute('role', 'article');
+		element.setAttribute('aria-label', isUser ? localize('myTrae.chat.userMessage', "Your Message") : localize('myTrae.chat.aiMessage', "AI Message"));
+		const header = DOM.append(element, $('.mytrae-chat-turn-header'));
+		const copyStatus = DOM.append(header, $('span.mytrae-chat-copy-status'));
+		copyStatus.setAttribute('role', 'status');
+		const copy = DOM.append(header, $<HTMLButtonElement>('button.mytrae-chat-action.mytrae-chat-copy'));
+		copy.type = 'button';
+		copy.disabled = turn.content.length === 0;
+		const copyLabel = localize('myTrae.chat.copyMessage', "Copy Message");
+		copy.setAttribute('aria-label', copyLabel);
+		this.appendIcon(copy, Codicon.copy);
+		this.messageDisposables.add(this.hoverService.setupManagedHover(getDefaultHoverDelegate('mouse'), copy, copyLabel));
+		this.messageDisposables.add(DOM.addDisposableListener(copy, 'click', async () => {
+			copy.disabled = true;
+			try {
+				await this.clipboardService.writeText(turn.content);
+				if (copy.isConnected) { copyStatus.textContent = localize('myTrae.chat.copied', "Copied"); }
+			} catch {
+				if (copy.isConnected) { copyStatus.textContent = localize('myTrae.chat.copyFailed', "Copy Failed. Try Again."); }
+			} finally {
+				copy.disabled = turn.content.length === 0;
+			}
+		}));
 
 		const body = DOM.append(element, $('.mytrae-chat-turn-body'));
 		if (isUser) {
@@ -416,19 +514,24 @@ export class AIChatViewPane extends ViewPane {
 			}));
 			DOM.append(body, rendered.element);
 			if (turn.pending) {
-				const pending = DOM.append(body, $('.mytrae-chat-pending'));
-				pending.textContent =
-					turn.content.length === 0
-						? localize('myTrae.chat.thinking', "Thinking...")
-						: '';
-				pending.classList.add(
-					...ThemeIcon.asClassName(Codicon.loading).split(' '),
-				);
+				this.renderPending(body, turn.content.length > 0);
 			}
 			if (turn.error) {
 				element.classList.add('error');
+				const error = DOM.append(body, $('.mytrae-chat-turn-error'));
+				error.setAttribute('role', 'alert');
+				error.textContent = turn.error;
 			}
 		}
+	}
+
+	private renderPending(container: HTMLElement, hasContent: boolean): void {
+		const pending = DOM.append(container, $('.mytrae-chat-pending'));
+		const icon = DOM.append(pending, $('span'));
+		icon.classList.add(...ThemeIcon.asClassName(Codicon.loading).split(' '));
+		icon.setAttribute('aria-hidden', 'true');
+		const label = DOM.append(pending, $('span'));
+		label.textContent = hasContent ? '' : localize('myTrae.chat.thinking', "Thinking...");
 	}
 
 	private renderContextChips(): void {
@@ -463,16 +566,23 @@ export class AIChatViewPane extends ViewPane {
 	private renderControls(): void {
 		const streaming = this.chatService.isStreaming;
 		const busy = streaming || this.submitting || this.changingSession;
-		this.sendButton.textContent = streaming
+		const sendLabel = streaming
 			? localize('myTrae.chat.stop', "Stop")
 			: localize('myTrae.chat.send', "Send");
+		this.sendButton.setAttribute('aria-label', sendLabel);
+		this.buttonHovers.get(this.sendButton)?.update(sendLabel);
+		DOM.clearNode(this.sendButton);
+		this.appendIcon(this.sendButton, streaming ? Codicon.debugStop : Codicon.arrowUp);
 		this.sendButton.classList.toggle('stop', streaming);
 		this.sendButton.disabled = !streaming && (this.submitting || this.changingSession);
-		this.modeSelect.value = this.chatService.mode ?? 'chat';
+		this.modeSelect.value = this.chatService.mode ?? 'build';
 		this.modeSelect.disabled = busy;
-		this.sessionSelect.disabled = busy || this.chatService.sessions.length === 0;
+		this.historyButton.disabled = busy || this.chatService.sessions.length === 0;
 		this.newSessionButton.disabled = busy;
-		this.deleteSessionButton.disabled = busy || !this.chatService.activeSession;
+		this.moreButton.disabled = busy;
+		this.modelButton.disabled = busy;
+		this.accessButton.disabled = busy;
+		this.accessLabel.textContent = this.aiConfigurationService.getValue<string>(AIConfig.AgentAccessMode) === 'fullAccess' ? localize('myTrae.chat.accessFull', "完全访问") : localize('myTrae.chat.accessReview', "提示人工审核");
 		this.rollbackButton.disabled = busy;
 		this.messagesContainer.setAttribute('aria-busy', String(streaming));
 	}
@@ -490,9 +600,7 @@ export class AIChatViewPane extends ViewPane {
 
 		const configuration = readAIConfiguration(this.aiConfigurationService);
 		const model = this.chatService.setMode ? configuration.agentModel || configuration.chatModel : configuration.chatModel;
-		this.statusElement.textContent = configured
-			? `${configuration.providerId} · ${model}`
-			: localize('myTrae.chat.notConfiguredShort', "Provider not configured");
+		this.modelLabel.textContent = model || localize('myTrae.chat.selectModel', "Select Model");
 
 		if (!configured || error) {
 			const text = DOM.append(this.banner, $('.mytrae-chat-banner-text'));
@@ -642,15 +750,17 @@ export class AIChatViewPane extends ViewPane {
 				maxResults: FILE_PICK_LIMIT,
 			});
 
-			const items: (IQuickPickItem & { resource: URI })[] = result.results.map(
-				(match) => ({
-					label: basename(match.resource),
-					description: match.resource.path,
-					resource: match.resource,
-				}),
-			);
+			const items: (IQuickPickItem & { resource?: URI; codebase?: boolean })[] = [{
+				label: localize('myTrae.chat.pickCodebase', "Search this codebase"),
+				description: localize('myTrae.chat.pickCodebaseHint', "@codebase — semantic retrieval from the workspace index"),
+				codebase: true,
+			}, ...result.results.map((match) => ({
+				label: basename(match.resource),
+				description: match.resource.path,
+				resource: match.resource,
+			}))];
 
-			if (items.length === 0 || this.messageDisposables.isDisposed || this.inputArea.value !== value) {
+			if (this.messageDisposables.isDisposed || this.inputArea.value !== value) {
 				return;
 			}
 
@@ -670,13 +780,21 @@ export class AIChatViewPane extends ViewPane {
 			this.inputArea.value =
 				this.inputArea.value.slice(0, atIndex) +
 				this.inputArea.value.slice(atIndex + 1 + pattern.length);
+			if (picked.codebase) {
+				this.addContext({
+					kind: AIChatContextKind.Codebase,
+					label: 'codebase',
+				});
+				return;
+			}
+			const resource = picked.resource!;
 			const openModel = this.codeEditorService.listCodeEditors()
 				.map(editor => editor.getModel())
-				.find(model => model?.uri.toString() === picked.resource.toString());
+				.find(model => model?.uri.toString() === resource.toString());
 			this.addContext({
 				kind: AIChatContextKind.File,
-				label: labelForResource(picked.resource),
-				uri: picked.resource,
+				label: labelForResource(resource),
+				uri: resource,
 				text: openModel?.getValue(),
 			});
 		} catch (error) {
